@@ -1,0 +1,6 @@
+/dist/
+/runnerd
+/runnerd.exe
+.env
+*.pem
+*.key
