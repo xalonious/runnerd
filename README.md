@@ -1,6 +1,6 @@
 # runnerd
 
-A lightweight GitHub Actions runner broker for personal repositories. runnerd provisions temporary repository-scoped runners on your own hardware, allowing multiple repositories to share a Raspberry Pi without creating a GitHub organization.
+A lightweight GitHub Actions runner broker for personal repositories. runnerd provisions temporary repository-scoped runners on your own Linux machine, allowing multiple repositories to use the same host without creating a GitHub organization.
 
 ## Overview
 
@@ -8,7 +8,7 @@ GitHub registers self-hosted runners at repository, organization, or enterprise 
 
 The official GitHub Actions runner executes the job, including ordinary `run:` and supported `uses:` steps. runnerd manages authentication, queueing, runner processes, and cleanup. GitHub continues to handle workflow triggers, dependencies, concurrency groups, secrets, cancellation, and job logs.
 
-The project is designed for Linux ARM64, with PM2 supervising the broker and nginx providing public HTTPS access.
+The project supports Linux ARM64 and amd64. The deployment instructions use PM2 to supervise the broker and nginx to provide public HTTPS access.
 
 ```mermaid
 flowchart LR
@@ -67,14 +67,14 @@ runnerd/
 
 ## Prerequisites
 
-- Linux ARM64 for the Raspberry Pi deployment, or Linux amd64 on another host
+- A Linux ARM64 or amd64 host
 - [Go](https://go.dev/doc/install) 1.26 or newer to build the broker
 - An official GitHub Actions runner distribution for the host architecture
 - A private GitHub App installed on the repositories that should use the broker
 - PM2 and nginx for the deployment described below
 - git and any tools required by your workflows, such as Node.js and npm
 
-Run runnerd as the same regular Linux user that owns your deployment checkouts and PM2 applications. The setup commands use your current user's home directory and identity. Adjust example project paths and application names for your own deployments.
+Run runnerd as a regular Linux user with access to the tools and files required by your workflows. If jobs manage existing PM2 applications, use the account that owns those applications. The setup commands use your current user's home directory and identity.
 
 ## Setup
 
@@ -123,13 +123,13 @@ Normal broker and runner execution does not require root.
 
 ### 3. Install the runner template
 
-Store the official Linux ARM64 runner distribution at:
+Store the official Linux runner distribution for your host's architecture at:
 
 ```text
 /opt/runnerd/runner
 ```
 
-Get the download and checksum instructions from repository **Settings → Actions → Runners → New self-hosted runner**, selecting Linux ARM64, or use the [official runner releases](https://github.com/actions/runner/releases). Verify the archive checksum, extract it into the template directory, and install any required OS dependencies.
+Get the download and checksum instructions from repository **Settings → Actions → Runners → New self-hosted runner**, selecting Linux and your host's architecture, or use the [official runner releases](https://github.com/actions/runner/releases). Verify the archive checksum, extract it into the template directory, and install any required OS dependencies.
 
 **Do not run `config.sh` or `run.sh` in this directory.** It must remain a pristine template. runnerd copies it into a private temporary directory for each job and starts that copy with its JIT configuration.
 
@@ -162,7 +162,7 @@ set +a
 
 ### 5. Build and start runnerd
 
-Build directly on the Pi from the repository root:
+Build directly on the Linux host from the repository root:
 
 ```bash
 go build -trimpath -o runnerd ./cmd/runnerd
@@ -178,7 +178,7 @@ pm2 save
 pm2 logs runnerd --lines 20
 ```
 
-Run these commands as your deployment user, using the same PM2 environment as your applications. PM2 retains the supplied environment across normal restarts. No ecosystem file is required.
+Run these commands as the account that will execute workflow jobs. PM2 retains the supplied environment across normal restarts. No ecosystem file is required.
 
 ## Environment variables
 
@@ -216,10 +216,10 @@ Change the job's runner selection to:
 runs-on: [self-hosted, runnerd]
 ```
 
-Replace an SSH deployment action with an ordinary `run:` step. The job executes locally as the user running runnerd, with access to that account's project directories and PM2 daemon. This example assumes a project at `$HOME/projects/my-app` and an existing PM2 application named `my-app`; replace both with your own:
+The GitHub App must be installed on the repository containing the workflow. Jobs using the configured label execute locally as the user running runnerd. A minimal example:
 
 ```yaml
-name: Deploy my-app
+name: Example workflow
 
 on:
   push:
@@ -227,37 +227,29 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: my-app-production
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  deploy:
+  example:
     runs-on: [self-hosted, runnerd]
     steps:
-      - name: Deploy
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run on the self-hosted machine
         run: |
-          set -e
-          cd "$HOME/projects/my-app"
-
-          pm2 stop my-app || true
-          git fetch origin main
-          git reset --hard origin/main
-          git clean -fd
-
-          npm ci
-          npm run build
-
-          pm2 start my-app
-          pm2 save
+          echo "Running on a runner provisioned by runnerd"
+          uname -sm
 ```
 
-The workflow defines the deployment path; runnerd has no repository-to-directory mapping. Ordinary checkout/build jobs use their isolated Actions workspace. Existing deployment scripts can explicitly use persistent directories, as above.
+Replace the example commands with your repository's build, test, or deployment steps. Checked-out files live in the temporary Actions workspace. If a job needs a persistent directory elsewhere on the host, reference that path explicitly in the workflow; runnerd has no repository-to-directory mapping.
 
-Separate frontend/backend directories, path filters, job outputs, and `needs:` dependencies work normally. Each provisioned runner executes at most one job. With one worker, jobs run sequentially; workflow concurrency groups continue to be managed by GitHub.
+Job outputs, `needs:` dependencies, and workflow concurrency groups work normally and remain GitHub's responsibility. Each provisioned runner executes at most one job. With one worker, jobs run sequentially.
 
 runnerd only provisions for `workflow_job` events where both the top-level action and nested job status are `queued`, and the requested labels include `RUNNER_LABEL`. The runner is registered with `self-hosted`, `Linux`, the host architecture (`ARM64` or `X64`), and the custom label. Arbitrary additional labels are not copied from the webhook.
 
-Choose actions compatible with the Pi's architecture and installed tools. This setup does not include Docker, so container actions and job/service containers need an alternative. For SVG snake generation, use [`Platane/snk/svg-only@v3`](https://github.com/Platane/snk/tree/v3/svg-only). Keep Discord notification steps and their secrets in the workflow as usual.
+Choose actions compatible with the host's architecture and installed tools. runnerd does not install Docker or other workflow dependencies. JavaScript and composite actions can run without Docker; container actions and job/service containers require Docker on the host.
 
 A JIT runner is scoped to a repository, not reserved for the specific job ID that triggered provisioning. GitHub may assign another queued job with matching labels in that repository.
 
@@ -353,24 +345,24 @@ The 45-second PM2 kill timeout gives the default 30-second broker shutdown budge
 
 ### Runner template updates
 
-Keep the official runner template current using the [runner release feed](https://github.com/actions/runner/releases). Stop runnerd between deployments, verify its children have exited, and replace the template with a fresh checksum-verified ARM64 distribution. Preserve ownership and executable permissions, leave it unconfigured, then restart runnerd and check readiness. Never carry credentials or workspaces into the new template.
+Keep the official runner template current using the [runner release feed](https://github.com/actions/runner/releases). Stop runnerd between jobs, verify its children have exited, and replace the template with a fresh checksum-verified distribution for the host's architecture. Preserve ownership and executable permissions, leave it unconfigured, then restart runnerd and check readiness. Never carry credentials or workspaces into the new template.
 
 ## Logging
 
 Logs use plain text with timestamps, levels, repository names, and job IDs:
 
 ```text
-2026-10-06 20:45:08 INFO owner/my-app job 12345 | job queued
-2026-10-06 20:45:10 INFO owner/my-app job 12345 | starting runner
-2026-10-06 20:45:53 INFO owner/my-app job 12345 | runner exited | exit code: 0 | duration: 42.5s
-2026-10-06 20:45:54 INFO owner/my-app job 12345 | cleanup completed
+2026-10-06 20:45:08 INFO owner/repository job 12345 | job queued
+2026-10-06 20:45:10 INFO owner/repository job 12345 | starting runner
+2026-10-06 20:45:53 INFO owner/repository job 12345 | runner exited | exit code: 0 | duration: 42.5s
+2026-10-06 20:45:54 INFO owner/repository job 12345 | cleanup completed
 ```
 
 Runner output appears after `runner:`; empty lines are skipped. `LOG_LEVEL=debug` includes delivery/installation/run IDs, runner names, provisioning messages, and ignored event details. GitHub remains authoritative for job results: a runner process exit code alone does not establish workflow success.
 
 ## Security and reliability
 
-A self-hosted runner executes repository workflow code directly on the Pi as the account running runnerd. Install the App only on trusted repositories, and do not send untrusted pull request workflows to this runner. Separate workspaces prevent collisions; they are not a sandbox. Jobs share the user's project access, PM2 daemon, and Unix permissions.
+A self-hosted runner executes repository workflow code directly on the host as the account running runnerd. Install the App only on trusted repositories, and do not send untrusted pull request workflows to this runner. Separate workspaces prevent collisions; they are not a sandbox. Jobs share the user's file access, Unix permissions, and any accessible services or process managers.
 
 Keep the private key and environment file at mode `600`, and the state directory at mode `700`. Do not grant unrestricted passwordless sudo. Broker credentials are removed from the runner environment, but jobs running as the same user can still access that user's files and processes. The JIT credential is passed through the official CLI argument and is visible to the same user/root through process inspection.
 
@@ -392,7 +384,7 @@ The queue and one-hour deduplication cache are in memory. Restarts lose both, an
 | GitHub returns `403` or `404` | App installation, selected repository access, and Administration permission |
 | GitHub rejects JIT configuration | The sanitized API message and configured `RUNNER_GROUP_ID` |
 | Job stays queued | Requested labels, worker occupancy, runner version, and network access |
-| Node/npm/PM2 is missing in a job | The environment and PATH used to start PM2 as your deployment user |
+| A workflow command is missing | Required tools are installed and available in the environment and PATH used to start runnerd |
 
 For startup problems, stop the PM2 entry and run `LOG_LEVEL=debug ./runnerd` from the configured shell to see the error directly. A state lock error means another broker is using the same state directory.
 
