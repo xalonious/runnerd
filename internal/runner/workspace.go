@@ -53,7 +53,7 @@ func (w *Workspaces) Ready() error {
 			return fmt.Errorf("runner template %s must be a regular file", path)
 		}
 	}
-	for _, path := range []string{".runner", ".credentials", ".credentials_rsaparams", ".env", ".path", "_work", "_diag"} {
+	for _, path := range []string{".runner", ".credentials", ".credentials_rsaparams", ".env", ".path", "_work", "_diag", jobHomeDir, jobTempDir} {
 		if _, err := os.Lstat(filepath.Join(w.Home, path)); err == nil {
 			return fmt.Errorf("runner template contains %s; use a pristine, unconfigured installation", path)
 		} else if !errors.Is(err, os.ErrNotExist) {
@@ -97,8 +97,8 @@ func (w *Workspaces) Create(ctx context.Context) (path string, err error) {
 		if rel == "." {
 			return nil
 		}
-		if rel == marker || rel == ".active" {
-			return fmt.Errorf("runner template contains reserved workspace metadata")
+		if rel == marker || rel == ".active" || rel == jobHomeDir || rel == jobTempDir {
+			return fmt.Errorf("runner template contains reserved workspace path: %s", rel)
 		}
 		dest := filepath.Join(path, rel)
 		info, err := entry.Info()
@@ -126,6 +126,11 @@ func (w *Workspaces) Create(ctx context.Context) (path string, err error) {
 	})
 	if err != nil {
 		return path, fmt.Errorf("copy runner template: %w", err)
+	}
+	for _, dir := range jobDirectories {
+		if err = os.Mkdir(filepath.Join(path, filepath.FromSlash(dir.path)), 0700); err != nil {
+			return path, fmt.Errorf("create job directory %s: %w", dir.path, err)
+		}
 	}
 	return path, nil
 }

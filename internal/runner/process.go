@@ -21,12 +21,19 @@ type Process struct {
 func Command(ctx context.Context, workspace, encoded string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, filepath.Join(workspace, "run.sh"), "--jitconfig", encoded)
 	cmd.Dir = workspace
+	jobEnv := jobEnvironment(workspace)
 	for _, env := range os.Environ() {
 		key, _, _ := strings.Cut(env, "=")
+		if _, overridden := jobEnv[key]; overridden {
+			continue
+		}
 		if strings.HasPrefix(key, "GITHUB_APP_") || key == "GITHUB_PRIVATE_KEY_PATH" || key == "GITHUB_WEBHOOK_SECRET" || strings.HasPrefix(key, "RUNNER_") || key == "LISTEN_ADDR" || key == "MAX_CONCURRENT_RUNNERS" || key == "QUEUE_SIZE" || key == "SHUTDOWN_TIMEOUT" {
 			continue
 		}
 		cmd.Env = append(cmd.Env, env)
+	}
+	for key, value := range jobEnv {
+		cmd.Env = append(cmd.Env, key+"="+value)
 	}
 	return cmd
 }

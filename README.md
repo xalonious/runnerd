@@ -26,7 +26,7 @@ flowchart LR
 - Repository and installation information taken directly from signed webhooks
 - GitHub App authentication with cached installation tokens
 - Configurable runner label, queue capacity, and global concurrency
-- One isolated runner directory per request
+- One disposable runner workspace, home, and temporary directory per job
 - Single-job JIT runners using the existing official runner installation
 - Delivery and job deduplication with a bounded one-hour cache
 - Graceful shutdown and cleanup of owned runner processes
@@ -74,7 +74,7 @@ runnerd/
 - PM2 and nginx for the deployment described below
 - git and any tools required by your workflows, such as Node.js and npm
 
-Run runnerd as a regular Linux user with access to the tools and files required by your workflows. If jobs manage existing PM2 applications, use the account that owns those applications. The setup commands use your current user's home directory and identity.
+Run runnerd as a regular Linux user with access to the tools and files required by your workflows. If jobs manage existing PM2 applications, use the account that owns those applications and set that daemon's absolute `PM2_HOME` globally in runnerd's environment file, as described below. The setup commands use your current user's home directory and identity.
 
 ## Setup
 
@@ -150,6 +150,14 @@ nano "$HOME/.config/runnerd/env"
 
 Fill in `GITHUB_APP_ID`, `GITHUB_PRIVATE_KEY_PATH`, and `GITHUB_WEBHOOK_SECRET`. The example uses port `3333` and a one-hour runner timeout.
 
+For workflows that manage existing PM2 apps, also set `PM2_HOME` once in this environment file. Use the existing daemon's absolute state directory; replace `/home/deploy/.pm2` below with your account's actual PM2 directory:
+
+```bash
+PM2_HOME='/home/deploy/.pm2'
+```
+
+runnerd passes this value to every job, so deployment workflows do not need to set it individually. Job `HOME` remains disposable. PM2 reads `PM2_HOME` automatically; no runnerd code changes are required.
+
 runnerd reads environment variables; it does not automatically load `.env` files. Load this shell-format file before starting the application:
 
 ```bash
@@ -197,6 +205,7 @@ Run these commands as the account that will execute workflow jobs. PM2 retains t
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` |
 | `SHUTDOWN_TIMEOUT` | `30s` | Shutdown budget used for HTTP and runner termination |
 | `RUNNER_TIMEOUT` | `24h` | Runner lifecycle limit after dequeue; `.env.example` uses `1h` |
+| `PM2_HOME` | Not set by runnerd | Existing PM2 daemon's absolute state directory; set globally in runnerd's environment file for all deployment jobs to inherit |
 
 Paths must be absolute, and the template and state directories must not overlap. Configuration, key access, template validation, state access, and bind errors stop the application at startup.
 
@@ -360,6 +369,45 @@ Logs use plain text with timestamps, levels, repository names, and job IDs:
 
 Runner output appears after `runner:`; empty lines are skipped. `LOG_LEVEL=debug` includes delivery/installation/run IDs, runner names, provisioning messages, and ignored event details. GitHub remains authoritative for job results: a runner process exit code alone does not establish workflow success.
 
+## Job storage
+
+Each job gets a fresh instance under `RUNNER_STATE_DIR`. All steps in that job share its workspace, home, and temporary directories. runnerd removes the entire instance after the official runner exits, including after action post-job steps. Existing failure and startup cleanup paths also remove these directories when the instance is eligible for cleanup.
+
+```text
+instance-<random>/
+  run.sh, bin/, ...    # Official runner installation
+  _work/              # Job workspace, created by the official runner
+  home/               # HOME
+    .config/          # XDG_CONFIG_HOME
+    .cache/           # XDG_CACHE_HOME
+    .local/share/     # XDG_DATA_HOME
+    .local/state/     # XDG_STATE_HOME
+  tmp/                # TMPDIR, TMP, TEMP
+    xdg-runtime/      # XDG_RUNTIME_DIR
+```
+
+These job directories are created with mode `700`. Inherited values of the listed environment variables are replaced for the child runner; the broker's own environment stays unchanged. The pristine runner template must not contain the reserved top-level `home` or `tmp` paths. Actions such as `peaceiris/actions-gh-pages` that create publishing repositories under `$HOME` now leave them inside the disposable instance.
+
+Files and caches inside the instance do not survive between jobs. For persistent deployment output or shared caches, explicitly select an absolute directory outside `RUNNER_STATE_DIR`, such as `/srv/portfolio` or `/var/cache/portfolio-builds`, with permissions for the runner account. Cleanup only removes owned instances; it does not remove external files or old leftovers in the account's real home.
+
+Home-based configuration is also fresh for each job. runnerd does not copy or link the account's existing Git, SSH, or other configuration into the instance. Provision the configuration needed by a job, or explicitly select a persistent configuration file through the tool's options. Tools already installed on the inherited `PATH` remain available, but tools that discover installations or configuration through `$HOME` may need explicit paths.
+
+For deployments that manage an existing PM2 daemon, configure `PM2_HOME` globally in `~/.config/runnerd/env`, as shown in the setup instructions. All jobs inherit it, so workflow steps can use ordinary commands such as `pm2 restart portfolio` without their own `env:` block.
+
+After adding or changing `PM2_HOME` for an existing installation, reload the environment and restart the broker:
+
+```bash
+set -a
+. "$HOME/.config/runnerd/env"
+set +a
+pm2 restart runnerd --update-env
+pm2 save
+```
+
+An explicitly configured `PM2_HOME` is preserved even though each job gets its own `HOME`. Without it, PM2 may select the job's disposable home and start a separate daemon. The same explicit-path approach applies to other persistent tools and services.
+
+This is directory separation, not filesystem isolation. Workflows can still use absolute paths, override environment variables, or invoke tools that look up the account's real home instead of using `$HOME`. Such writes are outside instance cleanup.
+
 ## Security and reliability
 
 A self-hosted runner executes repository workflow code directly on the host as the account running runnerd. Install the App only on trusted repositories, and do not send untrusted pull request workflows to this runner. Separate workspaces prevent collisions; they are not a sandbox. Jobs share the user's file access, Unix permissions, and any accessible services or process managers.
@@ -380,6 +428,7 @@ The queue and one-hour deduplication cache are in memory. Restarts lose both, an
 | Missing or configured template | `RUNNER_HOME` points at a clean extracted runner distribution |
 | State directory permission error | The directory exists and belongs to the PM2 user |
 | PM2 starts the wrong binary | `pm2 describe runnerd` shows the expected script path |
+| Deployment cannot find existing PM2 apps | Set the existing daemon's absolute `PM2_HOME` globally in runnerd's environment file, reload it, and restart with `--update-env` |
 | Webhook returns `401` | The App and environment use the same webhook secret |
 | GitHub returns `403` or `404` | App installation, selected repository access, and Administration permission |
 | GitHub rejects JIT configuration | The sanitized API message and configured `RUNNER_GROUP_ID` |
